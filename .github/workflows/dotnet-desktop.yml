@@ -1,0 +1,291 @@
+name: Android Release Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  core-smoke-test:
+    name: Core Smoke Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Build Celeste.Core
+        run: dotnet build "src/Celeste.Core/Celeste.Core.csproj" -c Release -clp:ErrorsOnly
+
+  build-android-apk:
+    name: Build Android APK
+    runs-on: windows-latest
+    needs: core-smoke-test
+    if: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+    env:
+      APP_VERSION_CODE: ${{ format('{0}{1}', github.run_number, github.run_attempt) }}
+      APP_VERSION_NAME: ${{ format('1.0.{0}.{1}', github.run_number, github.run_attempt) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Validate release signing secrets
+        shell: pwsh
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          $required = @("ANDROID_KEYSTORE_BASE64", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD")
+          $missing = @()
+          foreach ($name in $required) {
+            if ([string]::IsNullOrWhiteSpace((Get-Item -Path "Env:$name").Value)) {
+              $missing += $name
+            }
+          }
+
+          if ($missing.Count -gt 0) {
+            throw "Missing required signing secrets: $($missing -join ', '). Configure them in repository settings to allow in-place APK updates without uninstall."
+          }
+
+      - name: Prepare Android keystore
+        shell: pwsh
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          $keystorePath = Join-Path $env:RUNNER_TEMP "release.keystore"
+          [System.IO.File]::WriteAllBytes($keystorePath, [System.Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64))
+          "ANDROID_KEYSTORE_PATH=$keystorePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Show resolved app version
+        shell: pwsh
+        run: |
+          Write-Host "ApplicationVersion=$env:APP_VERSION_CODE"
+          Write-Host "ApplicationDisplayVersion=$env:APP_VERSION_NAME"
+
+      - name: Install Android workload
+        run: dotnet workload install android
+
+      - name: Download Content package
+        shell: pwsh
+        run: |
+          $tarPath = Join-Path $env:RUNNER_TEMP "Content.tar"
+          Invoke-WebRequest -Uri "https://github.com/HannDevps/UNNOFICIAL/releases/download/V/Content.tar" -OutFile $tarPath
+
+          $extractRoot = Join-Path $env:RUNNER_TEMP "content_extract"
+          if (Test-Path $extractRoot) {
+            Remove-Item $extractRoot -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+          tar -xf $tarPath -C $extractRoot
+
+          $contentRoot = Join-Path $env:GITHUB_WORKSPACE "Content"
+          if (Test-Path $contentRoot) {
+            Remove-Item $contentRoot -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $contentRoot -Force | Out-Null
+
+          $nestedContent = Join-Path $extractRoot "Content"
+          if (Test-Path $nestedContent) {
+            Copy-Item (Join-Path $nestedContent "*") $contentRoot -Recurse -Force
+          }
+          else {
+            Copy-Item (Join-Path $extractRoot "*") $contentRoot -Recurse -Force
+          }
+
+      - name: Validate Content package
+        shell: pwsh
+        run: |
+          $contentRoot = Join-Path $env:GITHUB_WORKSPACE "Content"
+          if (-not (Test-Path $contentRoot)) {
+            throw "Content folder not found: $contentRoot"
+          }
+
+          $requiredDirs = @("Graphics", "Dialog", "Effects", "Maps")
+          foreach ($dir in $requiredDirs) {
+            $full = Join-Path $contentRoot $dir
+            if (-not (Test-Path $full)) {
+              throw "Missing required content directory: $full"
+            }
+          }
+
+          $requiredFiles = @(
+            "Graphics/SpritesGui.xml",
+            "Graphics/Sprites.xml",
+            "Graphics/Portraits.xml",
+            "Graphics/BackgroundTiles.xml",
+            "Graphics/ForegroundTiles.xml",
+            "Graphics/CompleteScreens.xml",
+            "Graphics/AnimatedTiles.xml",
+            "Graphics/Atlases/Gameplay.meta",
+            "Graphics/Atlases/Gui.meta",
+            "Dialog/English.txt",
+            "Maps/0-Intro.bin"
+          )
+
+          foreach ($relative in $requiredFiles) {
+            $full = Join-Path $contentRoot $relative
+            if (-not (Test-Path $full)) {
+              throw "Missing required content file: $relative"
+            }
+          }
+
+          $fileCount = (Get-ChildItem -Path $contentRoot -Recurse -File | Measure-Object).Count
+          if ($fileCount -lt 900) {
+            throw "Content file count too low: $fileCount (expected >= 900)"
+          }
+
+          Write-Host "Content validation OK. File count: $fileCount"
+
+      - name: Restore solution
+        run: dotnet restore "Celeste.AndroidPort.sln"
+
+      - name: Validate ABI configuration
+        shell: pwsh
+        run: |
+          [xml]$csproj = Get-Content "${{ github.workspace }}\src\Celeste.Android\Celeste.Android.csproj"
+          $runtimeIds = $csproj.Project.PropertyGroup.RuntimeIdentifiers
+          if (-not $runtimeIds) {
+            throw "RuntimeIdentifiers not configured"
+          }
+
+          if ($runtimeIds -notmatch "android-arm" -or $runtimeIds -notmatch "android-arm64") {
+            throw "Expected RuntimeIdentifiers android-arm and android-arm64, got: $runtimeIds"
+          }
+
+          Write-Host "RuntimeIdentifiers validated: $runtimeIds"
+
+      - name: Build signed APK
+        shell: pwsh
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          dotnet publish "src/Celeste.Android/Celeste.Android.csproj" `
+            -c Release `
+            -f net9.0-android `
+            -clp:ErrorsOnly `
+            -p:AndroidPackageFormat=apk `
+            -p:ApplicationVersion=$env:APP_VERSION_CODE `
+            -p:ApplicationDisplayVersion=$env:APP_VERSION_NAME `
+            -p:AndroidKeyStore=true `
+            -p:AndroidSigningKeyStore="$env:ANDROID_KEYSTORE_PATH" `
+            -p:AndroidSigningStorePass="$env:ANDROID_KEYSTORE_PASSWORD" `
+            -p:AndroidSigningKeyAlias="$env:ANDROID_KEY_ALIAS" `
+            -p:AndroidSigningKeyPass="$env:ANDROID_KEY_PASSWORD"
+
+      - name: Verify Content embedded in APK (stored + identical bytes)
+        shell: pwsh
+        run: |
+          $scriptPath = Join-Path $env:RUNNER_TEMP "verify_apk_content.py"
+          @'
+          import glob
+          import os
+          import pathlib
+          import sys
+          import zipfile
+
+          workspace = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          content_root = workspace / "Content"
+          apk_candidates = glob.glob(str(workspace / "src" / "Celeste.Android" / "bin" / "Release" / "net9.0-android" / "**" / "*.apk"), recursive=True)
+
+          if not apk_candidates:
+              raise SystemExit("No APK generated to verify content embedding")
+
+          apk_path = pathlib.Path(apk_candidates[0])
+          required = [
+              "Graphics/SpritesGui.xml",
+              "Graphics/Sprites.xml",
+              "Graphics/Portraits.xml",
+              "Graphics/BackgroundTiles.xml",
+              "Graphics/ForegroundTiles.xml",
+              "Graphics/CompleteScreens.xml",
+              "Graphics/AnimatedTiles.xml",
+              "Graphics/Atlases/Gameplay.meta",
+              "Graphics/Atlases/Gui.meta",
+              "Dialog/English.txt",
+              "Maps/0-Intro.bin",
+          ]
+
+          with zipfile.ZipFile(apk_path, "r") as archive:
+              infos = archive.infolist()
+              content_infos = [info for info in infos if info.filename.startswith("assets/Content/")]
+
+              if len(content_infos) < 900:
+                  raise SystemExit(f"APK content entry count too low: {len(content_infos)} (expected >= 900)")
+
+              compressed = [info.filename for info in content_infos if info.compress_type != zipfile.ZIP_STORED]
+              if compressed:
+                  sample = "\n".join(compressed[:20])
+                  raise SystemExit(f"Found compressed Content assets in APK (expected stored/no-compress). Sample:\n{sample}")
+
+              for info in content_infos:
+                  rel = info.filename[len("assets/Content/"):]
+                  if not rel or rel.endswith("/"):
+                      continue
+
+                  source_file = content_root / rel
+                  if not source_file.is_file():
+                      continue
+
+                  if archive.read(info.filename) != source_file.read_bytes():
+                      raise SystemExit(f"Asset bytes differ from source file: {info.filename}")
+
+              for rel in required:
+                  source_file = content_root / rel
+                  if not source_file.is_file():
+                      raise SystemExit(f"Required source content file missing: {source_file}")
+
+                  entry_name = "assets/Content/" + rel.replace("\\", "/")
+                  try:
+                      data_apk = archive.read(entry_name)
+                  except KeyError as exc:
+                      raise SystemExit(f"Missing required asset in APK: {entry_name}") from exc
+
+                  data_src = source_file.read_bytes()
+                  if data_apk != data_src:
+                      raise SystemExit(f"Asset bytes differ from source file: {entry_name}")
+
+          print(f"APK content verification passed: {apk_path}")
+          print(f"Checked required files: {len(required)} | Content entries: {len(content_infos)}")
+          '@ | Set-Content -Path $scriptPath -Encoding utf8
+
+          python $scriptPath
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "${{ github.workspace }}\artifacts" -Force | Out-Null
+          $apks = Get-ChildItem -Path "${{ github.workspace }}\src\Celeste.Android\bin\Release\net9.0-android" -Recurse -Filter *.apk
+          if (-not $apks -or $apks.Count -eq 0) {
+            throw "No APK artifact found after publish"
+          }
+
+          $apks | Copy-Item -Destination "${{ github.workspace }}\artifacts" -Force
+
+      - name: Upload Android APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: ${{ github.workspace }}\artifacts\*.apk

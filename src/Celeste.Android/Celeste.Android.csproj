@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0-android</TargetFramework>
+    <SupportedOSPlatformVersion>21</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <ApplicationId>celestegame.app</ApplicationId>
+    <ApplicationTitle>CELESTE</ApplicationTitle>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationDisplayVersion>1.0.0</ApplicationDisplayVersion>
+    <RuntimeIdentifiers>android-arm;android-arm64</RuntimeIdentifiers>
+    <AndroidStoreUncompressedFileExtensions>xnb;bin;xml;txt;png;ogg;bank;meta;data;fnt;json;wav;mp3;jpg;jpeg;bmp;gif;obj;mtl;csv;yml;yaml;export;spritefont</AndroidStoreUncompressedFileExtensions>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="MonoGame.Content.Builder.Task" Version="3.8.*" />
+    <PackageReference Include="MonoGame.Framework.Android" Version="3.8.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Celeste.Core\Celeste.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AndroidAsset Include="../../Content/**/*.*"
+                  Condition="Exists('../../Content')"
+                  Link="Content/$([System.String]::Copy('%(RecursiveDir)').Replace('\\','/'))%(Filename)%(Extension)"
+                  LogicalName="Content/$([System.String]::Copy('%(RecursiveDir)').Replace('\\','/'))%(Filename)%(Extension)" />
+
+    <AndroidAsset Include="..\..\CONTROLES CELESTE\*.png"
+                  Link="controls_custom/%(Filename)%(Extension)" />
+    <AndroidAsset Include="..\..\CONTROLES CELESTE\*.dat"
+                  Link="controls_custom/%(Filename)%(Extension)" />
+    <AndroidAsset Include="..\..\ARQUIVOSPARAOANALOGICO\*.png"
+                  Link="analog_custom/%(Filename)%(Extension)" />
+    <AndroidAsset Include="..\..\ARQUIVOSPARAOANALOGICO\*.dat"
+                  Link="analog_custom/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AndroidNativeLibrary Include="..\..\FMOD-11.014\api\lowlevel\lib\armeabi-v7a\libfmod.so" />
+    <AndroidNativeLibrary Include="..\..\FMOD-11.014\api\lowlevel\lib\arm64-v8a\libfmod.so" />
+    <AndroidNativeLibrary Include="..\..\FMOD-11.014\api\studio\lib\armeabi-v7a\libfmodstudio.so" />
+    <AndroidNativeLibrary Include="..\..\FMOD-11.014\api\studio\lib\arm64-v8a\libfmodstudio.so" />
+    <AndroidJavaLibrary Include="..\..\FMOD-11.014\api\lowlevel\lib\fmod.jar" />
+  </ItemGroup>
+
+</Project>
